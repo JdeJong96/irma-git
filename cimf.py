@@ -668,15 +668,17 @@ def transform_vector(Vx, Vy, angle):
 def convert_wind(ds, angle=None):
     """Convert zonal/meridional wind to radial and tangential wind"""
     vprint(1, 'convert_wind()')
+    
     try:
         u = ds.u
         v = ds.v
     except AttributeError:
-        if ('u_rad' in ds) and ('v_tan' in ds):
+        if ('u_rad' in ds) or ('v_tan' in ds):
             vprint(1, 'convert_wind(): using existing u_rad and v_tan')
             return ds
         else:
-            raise
+            vprint(1, 'convert_wind(): no input, skipping')
+            return ds
     if angle is None:
         _,angle = toPolar(ds.latitude, ds.longitude, ds.xc, ds.yc)
     u_bg, v_bg = translational_velocity(ds) if 'valid_time' in ds.xc.dims else (0,0)
@@ -709,14 +711,15 @@ def cartesian_gradient(ds,var,comp='all'):
 def vorticity_flux(ds, angle=None):
     """Calculate vorticity flux in cartesian coordinates and return radial component"""
     vprint(1,'vorticity_flux()')
+    assert "cimf" in ds, "first run calc_cimf and store as ds['cimf']"
     if use_sigma:
         sigma = -1/g * ds.dtdp**(-1)
         dthetadt = ds.cimf/sigma
     else:
         vprint(1,'Calculating dthetadt with (slightly) misaligned dp and sigma.')
-        dp = calc_dp(ds)
         if 'z' not in ds.dims:
             ds = ds.swap_dims(theta='z')
+        dp = calc_dp(ds)
         dth = ds.theta.differentiate('z')
         sigma = -1/g*dp/dth
         dthetadt = ds.cimf/sigma
@@ -924,13 +927,6 @@ def azimean(ds, dr=5e3):
     #vprint(1,"azimean: convert_wind()")
     ds = convert_wind(ds, angle)
     #vprint(1,"azimean: done.")
-    try:
-        vprint(1,"azimean: vorticity_flux()")
-        ds = vorticity_flux(ds)
-        vprint(1,"azimean: done.")
-    except:
-        vprint(1,"azimean: not calculating vorticity flux")
-        pass
     vprint(1, "azimean_gufunc()")
     hasxy = [da for da in ds.data_vars if set(hdims).issubset(ds[da].dims)]
     ds[hasxy], nanratio = xr.apply_ufunc(
@@ -1108,6 +1104,7 @@ def main(files):
     if (method in ['lagrange2d','lagrange3d']):# and (not steady):
         ds = crop(ds)
     ds['cimf'] = calc_cimf(ds, T=0 if steady else None)
+    ds = vorticity_flux(ds)
     ds,nanratio = azimean(ds)
     vprint(1,"done.")
     return ds,nanratio
