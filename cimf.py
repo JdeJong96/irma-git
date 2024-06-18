@@ -688,6 +688,25 @@ def convert_wind(ds, angle=None):
     return ds.assign({'u_rad':u_rad, 'v_tan':v_tan})
 
 
+def convert_vorticityflux(ds, angle=None):
+    """Convert zonal/meridional vorticity flux to radial and tangential"""
+    vprint(1, 'convert_vorticityflux()')
+    if ('Ja' in ds) or ('Jh' in ds) or ('Je' in ds):
+        vprint(1, 'convert_vorticityflux(): radial Ja, Jh or Je already in ds')
+        return ds
+    if angle is None:
+        _,angle = toPolar(ds.latitude, ds.longitude, ds.xc, ds.yc)
+    Ja_rad, _ = transform_vector(ds.Ja_x, ds.Ja_y, angle)
+    Jh_rad, _ = transform_vector(ds.Jh_x, ds.Jh_y, angle)
+    Je_rad, _ = transform_vector(ds.Je_x, ds.Je_y, angle)
+    Ja_rad.attrs = {'long_name':'radial advective vorticity flux','units':'m s**-2'}
+    Jh_rad.attrs = {'long_name':'radial diabatic vorticity flux','units':'m s**-2'}
+    Je_rad.attrs = {'long_name':'radial eddy vorticity flux','units':'m s**-2'}
+    ds = ds.assign({'Ja':Ja_rad, 'Jh':Jh_rad, 'Je':Je_rad})
+    ds = ds.drop_vars(['Ja_x','Ja_y','Jh_x','Jh_y','Je_x','Je_y'])
+    return ds
+
+
 def cartesian_gradient(ds,var,comp='all'):
     vprint(1, 'cartesian_gradient()')
     if isinstance(var, str):
@@ -706,10 +725,20 @@ def cartesian_gradient(ds,var,comp='all'):
         dvdz = dvdz.chunk({'valid_time':len(dvdz.valid_time)})
         #dvdz = var.differentiate('theta')/ds.height.differentiate('theta')
     return dvdx, dvdy, dvdz
-    
+
+
+def vorticityflux_divergence(ds):
+    for var,s in zip(['Ja','Jh','Je'],['advective','diabatic','eddy']):
+        dJdx,_,_ = cartesian_gradient(ds, var+'_x', 'x')
+        _,dJdy,_ = cartesian_gradient(ds, var+'_y', 'y')
+        div = dJdx + dJdy
+        div.attrs = {'long_name':s+' vorticity flux divergence','units':'s**-2'}
+        ds['div'+var] = div
+    return ds
+
 
 def vorticity_flux(ds, angle=None):
-    """Calculate vorticity flux in cartesian coordinates and return radial component"""
+    """Calculate vorticity flux in cartesian coordinates"""
     vprint(1,'vorticity_flux()')
     assert "cimf" in ds, "first run calc_cimf and store as ds['cimf']"
     if use_sigma:
@@ -744,6 +773,8 @@ def vorticity_flux(ds, angle=None):
         dudth = xr.zeros_like(ds.u)
         dvdth = xr.zeros_like(ds.v)
         dzdth = xr.zeros_like(ds.height)
+    Ja_x = (ds.u-u_bg)*av
+    Ja_y = (ds.v-v_bg)*av
     Jh_x = dthetadt * dvdth
     Jh_y = -dthetadt * dudth
     l_sq = 100*ds.Ke**2 / ds.tke # square of turbulent length scale
@@ -769,19 +800,92 @@ def vorticity_flux(ds, angle=None):
     Je_y = -(duudx + duvdy + duwdz)
     if angle is None:
         _,angle = toPolar(ds.latitude, ds.longitude, ds.xc, ds.yc)
-    Ja_rad, _ = transform_vector((ds.u-u_bg)*av, (ds.v-v_bg)*av, angle)
-    Jh_rad, _ = transform_vector(Jh_x, Jh_y, angle)
-    Je_rad, _ = transform_vector(Je_x, Je_y, angle)
     av.attrs = {'long_name':'absolute vorticity', 'units':'s**-1'}
     sigma.attrs = {'long_name':'isentropic density', 'units':'kg m**-2 K**-1'}
-    Ja_rad.attrs = {'long_name':'advective component radial vorticity flux','units':'m s**-2'}
-    Jh_rad.attrs = {'long_name':'diabatic component radial vorticity flux','units':'m s**-2'}
-    Je_rad.attrs = {'long_name':'eddy component radial vorticity flux','units':'m s**-2'}
+    Ja_x.attrs = {'long_name':'advective component zonal vorticity flux','units':'m s**-2'}
+    Ja_y.attrs = {'long_name':'advective component meridional vorticity flux','units':'m s**-2'}
+    Jh_x.attrs = {'long_name':'diabatic component zonal vorticity flux','units':'m s**-2'}
+    Jh_y.attrs = {'long_name':'diabatic component meridional vorticity flux','units':'m s**-2'}
+    Je_x.attrs = {'long_name':'eddy component zonal vorticity flux','units':'m s**-2'}
+    Je_y.attrs = {'long_name':'eddy component meridional vorticity flux','units':'m s**-2'}
     ds = ds.assign({'l_sq':l_sq,'uu':uu,'vv':vv,'ww':ww,'wcwc':wcwc})
-    return ds.assign({'eta':av, 'sigma':sigma, 'Ja':Ja_rad, 'Jh':Jh_rad, 'Je':Je_rad})
+    return ds.assign({'eta':av, 'sigma':sigma, 'Ja_x':Ja_x, 'Ja_y':Ja_y, 'Jh_x':Jh_x, 'Jh_y':Jh_y, 'Je_x':Je_x, 'Je_y':Je_y})
 
 
 # # Old 
+# def vorticity_flux(ds, angle=None):
+#     """Calculate vorticity flux in cartesian coordinates and return radial component"""
+#     vprint(1,'vorticity_flux()')
+#     assert "cimf" in ds, "first run calc_cimf and store as ds['cimf']"
+#     if use_sigma:
+#         sigma = -1/g * ds.dtdp**(-1)
+#         dthetadt = ds.cimf/sigma
+#     else:
+#         vprint(1,'Calculating dthetadt with (slightly) misaligned dp and sigma.')
+#         if 'z' not in ds.dims:
+#             ds = ds.swap_dims(theta='z')
+#         dp = calc_dp(ds)
+#         dth = ds.theta.differentiate('z')
+#         sigma = -1/g*dp/dth
+#         dthetadt = ds.cimf/sigma
+#     rho = ds.pres / (Rdry * ds.t)
+#     wc = ds.cimf/rho # (cartesian) vertical velocity in m/s
+#     u_bg, v_bg = translational_velocity(ds)
+#     dzdx, dzdy, dzdz = cartesian_gradient(ds, ds.height)
+#     dudx, dudy, dudz = cartesian_gradient(ds, ds.u-u_bg)
+#     dvdx, dvdy, dvdz = cartesian_gradient(ds, ds.v-v_bg)
+#     dwdx, dwdy, dwdz = cartesian_gradient(ds, dthetadt) # w is shorthand for dthetadt
+#     dwcdx, dwcdy, dwcdz = cartesian_gradient(ds, wc)
+#     #dvdx = ddxND(ds.v) if hasattr(ds.v, 'longitude') else ddxND(ds.v, ds.latitude, ds.longitude)
+#     #dudy = ddyND(ds.u) if hasattr(ds.u, 'latitude') else ddyND(ds.u, ds.latitude, ds.longitude)
+#     av = (dvdx - dudy + fc).transpose(*ds.u.dims)
+#     av = xr.DataArray(av, coords=ds.u.coords, dims=ds.u.dims, name='eta')
+#     try:
+#         dudth = ddtheta(ds.u - u_bg)#.differentiate('theta')
+#         dvdth = ddtheta(ds.v - v_bg)#.differentiate('theta')
+#         dzdth = ddtheta(ds.height)#.differentiate('theta')
+#     except ValueError:
+#         vprint(1,'Could not calculate diabatic vorticity flux, set to 0')
+#         dudth = xr.zeros_like(ds.u)
+#         dvdth = xr.zeros_like(ds.v)
+#         dzdth = xr.zeros_like(ds.height)
+#     Jh_x = dthetadt * dvdth
+#     Jh_y = -dthetadt * dudth
+#     l_sq = 100*ds.Ke**2 / ds.tke # square of turbulent length scale
+#     lapu = dudx**2 + dudy**2 + dudz**2
+#     lapv = dvdx**2 + dvdy**2 + dvdz**2
+#     lapw = dwdx**2 + dwdy**2 + dwdz**2
+#     lapwc = dwcdx**2 + dwcdy**2 + dwcdz**2
+#     #l_sq = 2 * ds.tke / (gradu + gradv + gradwc)
+#     uu = l_sq * lapu
+#     vv = l_sq * lapu
+#     ww = l_sq * lapu
+#     wcwc = l_sq * (dwcdx**2 + dwcdy**2 + dwcdz**2)
+#     uv = l_sq * (dudx*dvdx + dudy*dvdy + dudz*dvdz)
+#     uw = l_sq * (dudx*dwdx + dudy*dwdy + dudz*dwdz)
+#     vw = l_sq * (dvdx*dwdx + dvdy*dwdy + dvdz*dwdz)
+#     duvdx,_,_ = cartesian_gradient(ds, uv, 'x')
+#     _,dvvdy,_ = cartesian_gradient(ds, vv, 'y')
+#     _,_,dvwdz = cartesian_gradient(ds, vw, 'z')
+#     duudx,_,_ = cartesian_gradient(ds, uu, 'x')
+#     _,duvdy,_ = cartesian_gradient(ds, uv, 'y')
+#     _,_,duwdz = cartesian_gradient(ds, uw, 'z')
+#     Je_x = duvdx + dvvdy + dvwdz
+#     Je_y = -(duudx + duvdy + duwdz)
+#     if angle is None:
+#         _,angle = toPolar(ds.latitude, ds.longitude, ds.xc, ds.yc)
+#     Ja_rad, _ = transform_vector((ds.u-u_bg)*av, (ds.v-v_bg)*av, angle)
+#     Jh_rad, _ = transform_vector(Jh_x, Jh_y, angle)
+#     Je_rad, _ = transform_vector(Je_x, Je_y, angle)
+#     av.attrs = {'long_name':'absolute vorticity', 'units':'s**-1'}
+#     sigma.attrs = {'long_name':'isentropic density', 'units':'kg m**-2 K**-1'}
+#     Ja_rad.attrs = {'long_name':'advective component radial vorticity flux','units':'m s**-2'}
+#     Jh_rad.attrs = {'long_name':'diabatic component radial vorticity flux','units':'m s**-2'}
+#     Je_rad.attrs = {'long_name':'eddy component radial vorticity flux','units':'m s**-2'}
+#     ds = ds.assign({'l_sq':l_sq,'uu':uu,'vv':vv,'ww':ww,'wcwc':wcwc})
+#     return ds.assign({'eta':av, 'sigma':sigma, 'Ja':Ja_rad, 'Jh':Jh_rad, 'Je':Je_rad})
+# 
+# 
 # def azimean(ds, dr=5e3, rmax=1000e3):
 #     vprint(1,"azimean()")
 #     if 'theta' in ds.dims:
@@ -1105,6 +1209,8 @@ def main(files):
         ds = crop(ds)
     ds['cimf'] = calc_cimf(ds, T=0 if steady else None)
     ds = vorticity_flux(ds)
+    ds = vorticityflux_divergence(ds)
+    ds = convert_vorticityflux(ds)
     ds,nanratio = azimean(ds)
     vprint(1,"done.")
     return ds,nanratio
